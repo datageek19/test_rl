@@ -46,3 +46,73 @@ FROM (
 GROUP BY ECDH_SUBMITTED_FILE_TYPE, ECDH_LOAD_DTM, ECDH_ETL_LOAD_DTM
 
 
+--------------------------------------------------------
+# updated query
+
+SELECT
+  EXTRACT(HOUR FROM admitted_start_dtime) AS hour,
+  file_type,
+  COUNT(*) AS count
+FROM adt_table
+GROUP BY EXTRACT(HOUR FROM admitted_start_dtime), file_type;
+
+
+SELECT
+  DATE_TRUNC('week', admitted_start_dtime) AS week_start_date,
+  file_type,
+  COUNT(*) AS count
+FROM adt_table
+GROUP BY DATE_TRUNC('week', admitted_start_dtime), file_type;
+
+
+SELECT
+  DATE_TRUNC('month', admitted_start_dtime) AS month_start_date,
+  file_type,
+  COUNT(*) AS count
+FROM adt_table
+GROUP BY DATE_TRUNC('month', admitted_start_dtime), file_type;
+
+
+##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
+SELECT 
+  date,
+  AVG(count) AS average_count
+FROM (
+  SELECT 
+    DATE(admitted_start_dtime) AS date,
+    file_type,
+    COUNT(*) AS count
+  FROM adt_table
+  GROUP BY DATE(admitted_start_dtime), file_type
+) subquery
+GROUP BY date;
+
+##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
+
+SELECT 
+  DATE_TRUNC('week', date) AS week_start_date,
+  AVG(average_count) AS average_count
+FROM (
+  SELECT 
+    DATE(admitted_start_dtime) AS date,
+    file_type,
+    COUNT(*) AS count
+  FROM adt_table
+  GROUP BY DATE(admitted_start_dtime), file_type
+) subquery
+GROUP BY DATE_TRUNC('week', date);
+
+##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
+SELECT 
+  DATE_TRUNC('month', date) AS month_start_date,
+  AVG(average_count) AS average_count
+FROM (
+  SELECT 
+    DATE(admitted_start_dtime) AS date,
+    file_type,
+    COUNT(*) AS count
+  FROM adt_table
+  GROUP BY DATE(admitted_start_dtime), file_type
+) subquery
+GROUP BY DATE_TRUNC('month', date);
+##+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++##
