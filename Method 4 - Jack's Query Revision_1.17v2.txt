@@ -1,0 +1,144 @@
+WITH cte1 as (
+--get data from msg_header table
+	SELECT 
+				mh.EXTENSION_ENCOUNTER_REF,
+				e.ECDH_TRACKING_ID,
+				mh.EVENT_EVENTCODING_CODE,
+				UPPER(mh.EXTENSION_SENDING_FACILITY_CODE) AS "EXTENSION_SENDING_FACILITY_CODE",
+				mh.EXTENSION_MESSAGE_HEADER_DTM             as msg_header_original,
+				substr(mh.EXTENSION_MESSAGE_HEADER_DTM,20,6)   as msg_header_parsed,
+				substring(msg_header_parsed, 5,3)           as a, --miilsecond check
+					CASE --this case block is removing the timestamp 
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 20, 6) = '+00:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS')
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 20, 6) = '-04:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS') + INTERVAL '4 HOURS'
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 20, 6) = '-05:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS') + INTERVAL '5 HOURS'
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 20, 6) = '-06:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS') + INTERVAL '6 HOURS'
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 20, 6) = '-07:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS') + INTERVAL '7 HOURS'
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 24, 6) = '+00:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS')
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 24, 6) = '-05:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS') + INTERVAL '5 HOURS'
+							WHEN substring(EXTENSION_MESSAGE_HEADER_DTM, 24, 6) = '-07:00' 
+								THEN TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)),
+							'YYYY-MM-DD HH24:MI:SS') + INTERVAL '7 HOURS'
+						ELSE TO_TIMESTAMP(concat(substring(EXTENSION_MESSAGE_HEADER_DTM, 0, 10), ' ', substring(EXTENSION_MESSAGE_HEADER_DTM, 12, 8)), 
+						'YYYY-MM-DD HH24:MI:SS') 
+						--when if else fails, then do nothing and concat
+					END as Extension_MSG_Header_DTM
+	FROM  		OCDP_PRD_OPTUMCARE_CORE_ECDH_L1_DB_SH.ECDH_L2.MESSAGE_HEADER as mh
+    JOIN        encounter e
+        on      e.encounter_id = mh.extension_encounter_ref
+    WHERE       e.period_start >= '2023-11-01'
+        and     e.period_start < '2024-01-01'
+        AND		EVENT_EVENTCODING_CODE IN ('A01', 'A03', 'A04', 'A06')
+	),
+cte2 as (
+	SELECT	--Get min value from cte1
+				EXTENSION_ENCOUNTER_REF,
+				ECDH_TRACKING_ID,
+				EVENT_EVENTCODING_CODE,
+				min(Extension_MSG_Header_DTM) as cte2Extension_MSG_Header_DTM
+	FROM cte1 
+    group by    EXTENSION_ENCOUNTER_REF,
+				ECDH_TRACKING_ID,
+				EVENT_EVENTCODING_CODE
+),
+cte3 as (
+	SELECT --Get data from  ENCOUNTER TABLE
+				ENCOUNTER_ID,
+				ENCOUNTER_CLASS_CODING_CODE,
+                REPLACE(PERIOD_START, 'T', ' ') AS TrimmedValue,
+				substring(e.period_start,20,6) as timezone_parsed,
+				substring(PERIOD_START, 12,8) as PERIOD_START_TIME_ONLY,
+					CASE
+						WHEN substr(period_start,1,10) like ('%-%') 
+							THEN 
+								CASE --this case block is removing the timestamp 
+									WHEN substring(PERIOD_START, 20, 6) = '+00:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									WHEN substring(PERIOD_START, 20, 6) = '-04:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									 + INTERVAL '4 HOURS'
+									WHEN substring(PERIOD_START, 20, 6) = '-05:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									 + INTERVAL '5 HOURS'
+									WHEN substring(PERIOD_START, 20, 6) = '-06:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									 + INTERVAL '6 HOURS'
+									WHEN substring(PERIOD_START, 20, 6) = '-07:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									 + INTERVAL '7 HOURS'
+									WHEN substring(PERIOD_START, 24, 6) = '+00:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									WHEN substring(PERIOD_START, 24, 6) = '-05:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									 + INTERVAL '5 HOURS'
+									WHEN substring(PERIOD_START, 24, 6) = '-07:00' 
+										THEN CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) as TIMESTAMP)
+									+ INTERVAL '7 HOURS'
+								ELSE CAST(concat(substring(PERIOD_START, 0, 10), ' ', substring(PERIOD_START, 12, 8)) AS TIMESTAMP)
+								--if no timestamp exists, then do nothing and concat
+                                END
+                        ELSE NULL
+					END as cte3Period_start,
+                    substr(cte3Period_start,11,23) as final_timezone_parsed,
+					PARSE_JSON(SERVICE_PROVIDER_ORGANIZATION_IDENTIFIER) :"value" :: STRING AS Facility_Name
+		FROM  		ENCOUNTER e
+		WHERE		ECDH_DATA_TYPE = 'ADT'
+		AND 		period_start >= '2023-11-01'
+        AND         period_start <  '2024-01-01'
+        -- AND         (Timezone_PARSED like ('-%') or Timezone_Parsed like ('+%'))
+),
+cte4 as(
+--get minimum formated period_start value from cte3
+    Select  
+                ENCOUNTER_ID,
+    			ENCOUNTER_CLASS_CODING_CODE, 
+                FACILITY_NAME,
+                min(cte3Period_start) as cte4MinPeriodStart
+    FROM        cte3 
+    group by    ENCOUNTER_ID,
+    			ENCOUNTER_CLASS_CODING_CODE, 
+                Facility_Name
+)
+SELECT --compute latency
+				c1.ecdh_tracking_id,
+				c4.encounter_id,
+				c1.EXTENSION_ENCOUNTER_REF,
+				c3.TrimmedValue as "Original Period Start Value",
+				c3.timezone_parsed,
+				c4.cte4MinPeriodStart as "MinPeriodStart", --formatted period start
+				c2.cte2Extension_MSG_Header_DTM as "MinTransformedMsgHeaderDTM",--formatted msg header dtm
+				(round(DATEDIFF(second, c4.cte4MinPeriodStart, c2.cte2Extension_MSG_Header_DTM) / 3600, 3)) AS Date_Diff_Hours,
+				c3.Facility_name
+FROM cte1 as c1
+JOIN cte2 as c2 
+    on 	c2.extension_encounter_ref = c1.extension_encounter_ref
+JOIN cte3 as c3
+	ON c3.encounter_id = c2.extension_encounter_ref
+JOIN cte4 as c4
+    on c4.encounter_id = c2.extension_encounter_ref
+group by            
+			c1.ecdh_tracking_id,
+			c4.encounter_id,
+			c1.EXTENSION_ENCOUNTER_REF,
+			c3.TrimmedValue,
+			c3.timezone_parsed,
+			c4.cte4MinPeriodStart,
+			c2.cte2Extension_MSG_Header_DTM, --formatted msg header dtm
+			c3.Facility_name
+order by 	date_diff_hours asc
+    
+;
