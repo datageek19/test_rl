@@ -1,0 +1,42 @@
+UHC internal / external latency task for all submitters:
+
+	- columns in CST are : 
+		MLLP DTM in encounter tables 
+		ECDH_adt_eventhub_dtm in encounter
+		ECDH_IRSI_process_dtm in encounter
+	
+	- columns are in UTC:
+		-ECDH_ETL_load_dtm
+		- ECDH_load_dtm, 
+		- ECDH_update_dtm
+		
+	when messages comes through, it populated to load_dtm/update_dtm;
+	
+	we use update_dtm in utc time zones
+	
+	MLLP -> Evenhub_dtm - > IRIS_process_dtm -> ETL_load_dtm -> ecdh_update_dtm
+	
+	computer latency between:
+		1. MLLP_dtm to ecdh_eventhub_dtm
+		2. ecdh_eventhub_dtm to ecdh_iris_process_dtm
+		3. ecdh_iris_process_dtm to etl_load_dtm
+		4. ecdh_load_dtm to ecdh_update_dtm
+
+	overall latency from MLLP dtm -> ECDH_update-dtm
+	
+	use encounter and org tables to get latency, where pick all hostpital names from names column in org tables
+	
+	expected output:
+		90 days interval for all adt by submitters
+		
+todo:
+	- in cte tables, do those steps:
+			step1:	convert ECDH_MLLP_DTM, ECDH_ADT_EVENT_HUB_DTM, ECDH_IRIS_PROCESS_DTM TO UTC TIME ZONE BY DOING OFFSET VALUE CHECKING AND DO CONVERSION
+			step 2: need to compute latency from ECDH_MLLP_DTM to ECDH_ADT_EVENT_HUB_DTM (latency_1)
+			step 3: also need to compute latency from ECDH_ADT_EVENT_HUB_DTM to ECDH_IRIS_PROCESS_DTM (latency_2)
+			step 4: also need to compute latency from ECDH_IRIS_PROCESS_DTM to ECDH_ETL_LOAD_DTM (latency_3)
+			step 5: also need to compute latency from ECDH_ETL_LOAD_DTM to ECDH_UPDATE_DTM (latency_4)
+			step 6: take average of step1, step2, ste3, step4 as overall average internal latency	(avg_internal_latency)
+	- then join cte table which is encounter table (if encounter tabel can be joined directly with org tables); if not, cte first joined with patient tables first then join with org tables
+	- then group by name column in org table ( which is hostpital names ) by step1, step2, step3, ste4, step5, step6; filter by ADT only
+	
