@@ -480,3 +480,117 @@ SELECT
     COUNT(DISTINCT CASE WHEN keyword_match_flag = 1 AND condition_code_match_flag = 1 THEN ENCOUNTER_ID END) AS both_match_count
 FROM cte_with_flags;
 
+
+-- new approach ( to handle one word or phrase matching)
+
+WITH cte AS (
+    -- Get the base patient encounter data
+    SELECT 
+        e.RSN_CD1_CDNG_T,  -- reason code text
+        c.cd_cdng_c,       -- condition code (doctor input)
+        e.ENCOUNTER_ID
+    FROM ECT_PRD_ECDH_DB.FOUNDATION.ENCOUNTER e
+    INNER JOIN ECT_PRD_ECDH_DB.FOUNDATION.CONDITION c 
+        ON e.encounter_id = c.encounter_ref
+    WHERE UPPER(e.ECDH_SUBMITTED_FILE_TYPE) = 'ADT'
+),
+
+keyword_match AS (
+    -- Records matching the exact keywords or phrases
+    SELECT DISTINCT
+        ENCOUNTER_ID
+    FROM cte
+    WHERE REGEXP_INSTR(
+        UPPER(RSN_CD1_CDNG_T), 
+        '\b(ALCOHOL|AMPHETAMINES|AVINZA|BARBITURATES|BENZO|BENZODIAZEPINE|BLOOD ALCOHOL|BUPRENORPHINE|CANNABI|COCAINE|CODEINE|CRACK|DETOX|DILAUDID|DRUG ABUSE|DRUG DEPENDENCE|DURAGESIC|ETHANOL|FENTANYL|HALLUCINOGEN|HEROIN|HYDROCODONE|HYPNOTIC|INTOXICATION|IVDU|LSD|METHADONE|METHAMPHETAMINE|METHYLPHENIDATE|MORPHINE|NALOXONE|NALTREXONE|NARCAN|NARCOTIC|O\.D\.|OPANA|OPIATE|OPIOID|OPIUM|OUD|OVERDOSE|OXYCODONE|OXYCONTIN|PERCOCET|POLYDRUG|POLYSUB|PSUD|PSYCHOACTIVE|SEDATIVE|STIMULANT|SUBOXONE|VICODIN)\b'
+    ) > 0
+)
+SELECT
+    -- Total records that match the keyword list
+    (SELECT COUNT(*) FROM keyword_match) AS keyword_match_count;
+
+-- new solution (attempt 1)
+WITH cte AS (
+    -- Get the base patient encounter data
+    SELECT 
+        e.RSN_CD1_CDNG_T,  -- reason code text
+        c.cd_cdng_c,       -- condition code (doctor input)
+        e.ENCOUNTER_ID
+    FROM ECT_PRD_ECDH_DB.FOUNDATION.ENCOUNTER e
+    INNER JOIN ECT_PRD_ECDH_DB.FOUNDATION.CONDITION c 
+        ON e.encounter_id = c.encounter_ref
+    WHERE UPPER(e.ECDH_SUBMITTED_FILE_TYPE) = 'ADT'
+),
+
+keyword_array AS (
+    -- Split reason code text into an array of words
+    SELECT 
+        ENCOUNTER_ID,
+        SPLIT(RSN_CD1_CDNG_T, ' ') AS description_words
+    FROM cte
+),
+
+keyword_match AS (
+    -- Check if any word from the array matches a keyword
+    SELECT DISTINCT
+        ENCOUNTER_ID
+    FROM keyword_array
+    WHERE ARRAY_CONTAINS(ARRAY['ALCOHOL', 'AMPHETAMINES', 'BLOOD ALCOHOL', 'BENZO', 'O.D.'], description_words)
+)
+SELECT
+    (SELECT COUNT(*) FROM keyword_match) AS keyword_match_count;
+
+
+-- another update
+WITH cte AS (
+    -- Get the base patient encounter data
+    SELECT 
+        e.RSN_CD1_CDNG_T,  -- reason code text
+        c.cd_cdng_c,       -- condition code (doctor input)
+        e.ENCOUNTER_ID
+    FROM ECT_PRD_ECDH_DB.FOUNDATION.ENCOUNTER e
+    INNER JOIN ECT_PRD_ECDH_DB.FOUNDATION.CONDITION c 
+        ON e.encounter_id = c.encounter_ref
+    WHERE UPPER(e.ECDH_SUBMITTED_FILE_TYPE) = 'ADT'
+),
+
+keyword_match AS (
+    -- Records matching the exact keywords or phrases using REGEXP_LIKE
+    SELECT DISTINCT
+        ENCOUNTER_ID
+    FROM cte
+    WHERE REGEXP_LIKE(
+        UPPER(RSN_CD1_CDNG_T), 
+        '\b(ALCOHOL|AMPHETAMINES|AVINZA|BARBITURATES|BENZO|BENZODIAZEPINE|BLOOD ALCOHOL|BUPRENORPHINE|CANNABI|COCAINE|CODEINE|CRACK|DETOX|DILAUDID|DRUG ABUSE|DRUG DEPENDENCE|DURAGESIC|ETHANOL|FENTANYL|HALLUCINOGEN|HEROIN|HYDROCODONE|HYPNOTIC|INTOXICATION|IVDU|LSD|METHADONE|METHAMPHETAMINE|METHYLPHENIDATE|MORPHINE|NALOXONE|NALTREXONE|NARCAN|NARCOTIC|O\.D\.|OPANA|OPIATE|OPIOID|OPIUM|OUD|OVERDOSE|OXYCODONE|OXYCONTIN|PERCOCET|POLYDRUG|POLYSUB|PSUD|PSYCHOACTIVE|SEDATIVE|STIMULANT|SUBOXONE|VICODIN)\b'
+    )
+)
+SELECT
+    (SELECT COUNT(*) FROM keyword_match) AS keyword_match_count;
+
+-- ++
+WITH cte AS (
+    -- Get the base patient encounter data
+    SELECT 
+        e.RSN_CD1_CDNG_T,  -- reason code text
+        c.cd_cdng_c,       -- condition code (doctor input)
+        e.ENCOUNTER_ID
+    FROM ECT_PRD_ECDH_DB.FOUNDATION.ENCOUNTER e
+    INNER JOIN ECT_PRD_ECDH_DB.FOUNDATION.CONDITION c 
+        ON e.encounter_id = c.encounter_ref
+    WHERE UPPER(e.ECDH_SUBMITTED_FILE_TYPE) = 'ADT'
+),
+
+keyword_match AS (
+    -- Records matching the exact keywords or phrases using LIKE
+    SELECT DISTINCT
+        ENCOUNTER_ID
+    FROM cte
+    WHERE UPPER(RSN_CD1_CDNG_T) LIKE '%ALCOHOL%' OR
+          UPPER(RSN_CD1_CDNG_T) LIKE '%AMPHETAMINES%' OR
+          UPPER(RSN_CD1_CDNG_T) LIKE '%BLOOD ALCOHOL%' OR
+          UPPER(RSN_CD1_CDNG_T) LIKE '%BENZO%' OR
+          UPPER(RSN_CD1_CDNG_T) LIKE '%O.D.%'  -- add more conditions for each keyword/phrase
+)
+SELECT
+    (SELECT COUNT(*) FROM keyword_match) AS keyword_match_count;
+
