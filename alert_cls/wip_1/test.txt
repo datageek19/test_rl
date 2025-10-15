@@ -1,6 +1,0 @@
-Onshore	Percentage
-PT002	30%
-PT001, PT003, PT004	70%
-Offshore	 
-PT002	25%
-PT001, PT003, PT004	75%
