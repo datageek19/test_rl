@@ -175,7 +175,7 @@ class DataIngestionService:
                 )
 
         # Pre-compute centrality metrics
-        print("  ► Computing graph metrics...")
+        print("  > Computing graph metrics...")
         try:
             self._pagerank_cache = nx.pagerank(self.service_graph)
             self._betweenness_cache = nx.betweenness_centrality(
