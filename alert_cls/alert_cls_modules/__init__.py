@@ -1,7 +1,7 @@
 """
 Alert Data Classification Module
 
-  Modular solution for alert classification, clustering, and analysis.
+Modular system for alert classification, clustering, and analysis.
 """
 
 __version__ = "1.0.0"
@@ -21,4 +21,3 @@ __all__ = [
     'ResultStorage',
     'AlertWorkflowScheduler'
 ]
-
