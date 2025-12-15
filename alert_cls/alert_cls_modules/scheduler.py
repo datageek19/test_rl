@@ -147,12 +147,33 @@ class AlertWorkflowScheduler:
             # ============================================================
             # STEP 4: Cluster Prediction (using trained cluster model)
             # ============================================================
-            # Check if model exists, if not train one
+            # Check if model exists and is compatible
+            need_retrain = False
             if self.model_manager.current_version == 0:
                 print("\n No trained model found - training initial model...")
+                need_retrain = True
+            else:
+                # Check if existing model is compatible with current features
+                try:
+                    loaded_model = self.model_manager.load_model()
+                    expected_features = loaded_model['pca'].n_components_ if loaded_model['pca'] else len(loaded_model['metadata']['feature_names'])
+                    actual_features = feature_matrix_scaled.shape[1]
+                    
+                    if expected_features != actual_features:
+                        print(f"\n Feature mismatch: model expects {expected_features}, got {actual_features}")
+                        print(" Retraining model with new features...")
+                        need_retrain = True
+                except Exception as e:
+                    print(f"\n Error loading model: {e}")
+                    print(" Retraining model...")
+                    need_retrain = True
+            
+            if need_retrain:
+                # Get cleaned alerts after outlier removal
+                cleaned_alerts = alert_processor.alerts_df.to_dict('records')
                 self.model_manager.train_new_model(
                     feature_matrix_scaled=feature_matrix_scaled,
-                    alerts=enriched_alerts,
+                    alerts=cleaned_alerts,
                     scaler=scaler,
                     pca=pca,
                     feature_names=feature_names,
@@ -271,9 +292,11 @@ class AlertWorkflowScheduler:
             
             # Train new model
             print("\n[Retraining] Training new model...")
+            # Get cleaned alerts after outlier removal
+            cleaned_alerts = alert_processor.alerts_df.to_dict('records')
             version, metadata = self.model_manager.train_new_model(
                 feature_matrix_scaled=feature_matrix_scaled,
-                alerts=enriched_alerts,
+                alerts=cleaned_alerts,
                 scaler=scaler,
                 pca=pca,
                 feature_names=feature_names,
