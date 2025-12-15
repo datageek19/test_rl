@@ -11,11 +11,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 
-from .data_ingestion import DataIngestionService
-from .alert_processor import AlertProcessor
-from .model_manager import ModelManager
-from .cluster_predictor import ClusterPredictor
-from .result_storage import ResultStorage
+from data_ingestion import DataIngestionService
+from alert_processor import AlertProcessor
+from model_manager import ModelManager
+from cluster_predictor import ClusterPredictor
+from result_storage import ResultStorage
 
 
 class AlertWorkflowScheduler:
