@@ -533,12 +533,18 @@ class ComprehensiveAlertConsolidator:
         print(f"    Found {len(service_groups)} service groups")
         print(f"    {len(unmapped_alerts)} unmapped alerts")
         
+        # Debug: Count total alerts in service groups
+        total_in_groups = sum(len(alerts) for alerts in service_groups.values())
+        print(f"    Total alerts in service groups: {total_in_groups}")
+        print(f"    Total alerts being processed: {total_in_groups + len(unmapped_alerts)}")
+        
         # Analyze service relationships and impact
         print("    Analyzing service relationships and impact propagation...")
         
         self.consolidated_groups = []
         processed_services = set()
         
+        group_counter = 0
         for service_name, alerts in service_groups.items():
             if service_name in processed_services:
                 continue
@@ -562,27 +568,85 @@ class ComprehensiveAlertConsolidator:
                 'impact_radius': len(impacted_services)  # Blast radius
             }
             
+            # Debug first few groups
+            if group_counter < 3:
+                print(f"\n      Group {group_counter}: Primary={service_name}, Alerts={len(alerts)}, " +
+                      f"Correlated={len(correlated_services)}, Impacted={len(impacted_services)}")
+            
             # Add alerts from correlated services (services with alerts that are related)
             for correlated_svc in correlated_services:
                 if correlated_svc in service_groups:
+                    correlated_alert_count = len(service_groups[correlated_svc])
                     group['alerts'].extend(service_groups[correlated_svc])
-                    group['alert_count'] += len(service_groups[correlated_svc])
+                    group['alert_count'] += correlated_alert_count
                     processed_services.add(correlated_svc)
+                    
+                    if group_counter < 3:
+                        print(f"        + Added {correlated_alert_count} alerts from correlated service: {correlated_svc}")
             
             # Add group metadata
             group['alert_types'] = list(set(a.get('alert_name', '') for a in group['alerts']))
             group['namespaces'] = list(set(a.get('namespace', '') for a in group['alerts'] if a.get('namespace')))
             group['clusters'] = list(set(a.get('cluster', '') for a in group['alerts'] if a.get('cluster')))
             
+            if group_counter < 3:
+                print(f"        Final group size: {len(group['alerts'])} alerts")
+            
             self.consolidated_groups.append(group)
             processed_services.add(service_name)
+            group_counter += 1
+        
+        # Check if all services were processed
+        all_services = set(service_groups.keys())
+        unprocessed_services = all_services - processed_services
+        if unprocessed_services:
+            print(f"\n    WARNING: {len(unprocessed_services)} services were not processed!")
+            print(f"    Unprocessed services (first 5): {list(unprocessed_services)[:5]}")
+            # Count alerts in unprocessed services
+            unprocessed_alert_count = sum(len(service_groups[s]) for s in unprocessed_services)
+            print(f"    Alerts in unprocessed services: {unprocessed_alert_count}")
+        else:
+            print(f"    All {len(all_services)} services with alerts were processed into groups")
         
         # Handle unmapped alerts - group by namespace/cluster/node
         if unmapped_alerts:
+            print(f"\n    Processing {len(unmapped_alerts)} unmapped alerts...")
             unmapped_groups = self._group_unmapped_alerts(unmapped_alerts)
             self.consolidated_groups.extend(unmapped_groups)
+            print(f"    Created {len(unmapped_groups)} unmapped groups")
         
-        print(f" Created {len(self.consolidated_groups)} consolidated groups with impact analysis")
+        print(f"\n Created {len(self.consolidated_groups)} consolidated groups with impact analysis")
+        
+        # Debug: Count total alerts in consolidated groups
+        total_in_consolidated = sum(len(g['alerts']) for g in self.consolidated_groups)
+        print(f"    Total alerts in consolidated groups: {total_in_consolidated}")
+        print(f"    Original enriched_alerts count: {len(self.enriched_alerts)}")
+        
+        if total_in_consolidated != len(self.enriched_alerts):
+            print(f"    WARNING: Mismatch detected! {total_in_consolidated} in groups vs {len(self.enriched_alerts)} enriched")
+            print(f"    Difference: {abs(total_in_consolidated - len(self.enriched_alerts))} alerts")
+            
+            # Check for duplicate alerts across groups
+            all_alert_ids = []
+            for g in self.consolidated_groups:
+                for alert in g['alerts']:
+                    # Use unique identifier (combination of fields)
+                    alert_id = (
+                        alert.get('alert_name', ''),
+                        alert.get('service_name', ''),
+                        alert.get('pod', ''),
+                        alert.get('start_timestamp', 0)
+                    )
+                    all_alert_ids.append(alert_id)
+            
+            unique_alert_ids = set(all_alert_ids)
+            if len(all_alert_ids) != len(unique_alert_ids):
+                duplicates = len(all_alert_ids) - len(unique_alert_ids)
+                print(f"    ISSUE FOUND: {duplicates} duplicate alert references across groups!")
+                print(f"    This means some alerts appear in multiple groups.")
+            else:
+                print(f"    No duplicate alert references found across groups.")
+                print(f"    The mismatch must be from unmapped alerts or other source.")
         
         # CRITICAL: Apply deduplication immediately after grouping (before feature engineering)
         print("\n[4.5/8] Deduplicating alerts within graph-based groups...")
@@ -792,6 +856,9 @@ class ComprehensiveAlertConsolidator:
         self.deduplicated_alerts = []
         self.duplicate_groups = []
         total_duplicates = 0
+        total_alerts_before = sum(len(g['alerts']) for g in self.consolidated_groups)
+        
+        print(f"    Starting deduplication on {total_alerts_before} alerts across {len(self.consolidated_groups)} groups")
         
         for group in self.consolidated_groups:
             group_alerts = group['alerts']
@@ -850,8 +917,21 @@ class ComprehensiveAlertConsolidator:
             group['unique_count'] = len(group_unique_alerts)
             group['duplicate_count'] = len(group_alerts) - len(group_unique_alerts)
         
+        total_original = sum(g['original_count'] for g in self.consolidated_groups)
+        dedup_rate = (total_duplicates / total_original * 100) if total_original > 0 else 0
+        
         print(f"    Found {total_duplicates} duplicates across {len(self.consolidated_groups)} groups")
-        print(f"    {len(self.deduplicated_alerts)} unique alerts remain (reduced from {sum(g['original_count'] for g in self.consolidated_groups)})")
+        print(f"    {len(self.deduplicated_alerts)} unique alerts remain (reduced from {total_original})")
+        print(f"    Deduplication rate: {dedup_rate:.1f}%")
+        
+        # Detailed breakdown per group (for large groups)
+        large_groups = [g for g in self.consolidated_groups if g['original_count'] > 10]
+        if large_groups:
+            print(f"\n    Top 5 groups with most duplicates:")
+            large_groups_sorted = sorted(large_groups, key=lambda x: x['duplicate_count'], reverse=True)[:5]
+            for g in large_groups_sorted:
+                print(f"      Group {g['group_id']}: {g['duplicate_count']} duplicates from {g['original_count']} alerts " +
+                      f"({g['duplicate_count']/g['original_count']*100:.1f}% dedup rate)")
         
         # Update enriched_alerts to reflect deduplication status
         # Mark all alerts in enriched_alerts with their deduplication status
@@ -1871,20 +1951,56 @@ class ComprehensiveAlertConsolidator:
         primary_services_list = [f"{svc} ({count})" for svc, count in service_counts.most_common(5)]
         primary_services_str = ', '.join(primary_services_list) if primary_services_list else 'Unmapped services'
         
-        # --- MOST AFFECTED SERVICES ---
-        # Downstream services that would be impacted by these alerts
-        affected_services = set()
+        # --- ROOT CAUSE SERVICES (Calculate first) ---
+        # Identify services that are likely root causes (have high downstream impact)
+        root_cause_services_preliminary = []
+        root_cause_services_set = set()
         for service in set(services):
             if service and self.service_graph.has_node(service):
-                # Get downstream services (up to 2 hops)
-                downstream = self._find_impacted_services(service, max_depth=2)
-                affected_services.update(downstream)
+                downstream = self._get_transitive_downstream(service, max_depth=2)
+                downstream_count = len(downstream)
+                if downstream_count > 5:  # Root cause threshold
+                    root_cause_services_preliminary.append({
+                        'service': service,
+                        'downstream_count': downstream_count,
+                        'downstream_services': downstream
+                    })
+                    root_cause_services_set.add(service)
         
-        # Remove services that are already in the primary list
+        # --- MOST AFFECTED SERVICES ---
+        # Downstream services that would be impacted by ROOT CAUSE services only
+        affected_services = set()
+        affected_debug = {}
+        
+        if root_cause_services_preliminary:
+            # Only calculate affected services from root causes
+            for rc in root_cause_services_preliminary:
+                service = rc['service']
+                downstream = rc['downstream_services']
+                affected_services.update(downstream)
+                affected_debug[service] = len(downstream)
+        else:
+            # No root causes identified, fall back to primary service only
+            if services:
+                primary_service = Counter(services).most_common(1)[0][0]
+                if primary_service and self.service_graph.has_node(primary_service):
+                    downstream = self._find_impacted_services(primary_service, max_depth=2)
+                    affected_services.update(downstream)
+                    affected_debug[primary_service] = len(downstream)
+        
+        # Remove services that are already in the primary list (they're the cause, not affected)
+        affected_services_before_filter = len(affected_services)
         affected_services = affected_services - set(services)
         affected_services_list = list(affected_services)[:10]  # Top 10
         affected_services_str = ', '.join(affected_services_list) if affected_services_list else 'None identified'
         affected_count = len(affected_services)
+        
+        # Debug logging
+        if cluster_id <= 5:
+            print(f"        Root cause services identified: {len(root_cause_services_preliminary)}")
+            print(f"        Affected calculated from: {list(affected_debug.keys())[:5]}")
+            print(f"        Affected analysis: {affected_debug}")
+            print(f"        Before filter: {affected_services_before_filter}, After filter: {affected_count}")
         
         # --- POTENTIAL ROOT CAUSES ---
         root_causes = []
@@ -2015,16 +2131,33 @@ class ComprehensiveAlertConsolidator:
         else:
             timeline = "unknown"
         
-        # --- ROOT CAUSE SERVICES ---
-        # Identify services that are likely root causes (have high downstream impact)
+        # --- ROOT CAUSE SERVICES (Already calculated above) ---
+        # Format root cause services for output
         root_cause_services = []
+        root_cause_debug = []
+        for rc in root_cause_services_preliminary:
+            service = rc['service']
+            count = rc['downstream_count']
+            root_cause_services.append(f"{service} (impacts {count} services)")
+            root_cause_debug.append(f"{service}: {count} downstream")
+        
+        # Also add services not identified as root causes for debugging
         for service in set(services):
-            if service and self.service_graph.has_node(service):
-                downstream = self._get_transitive_downstream(service, max_depth=2)
-                if len(downstream) > 5:
-                    root_cause_services.append(f"{service} (impacts {len(downstream)} services)")
+            if service and service not in root_cause_services_set:
+                if service and self.service_graph.has_node(service):
+                    downstream = self._get_transitive_downstream(service, max_depth=2)
+                    downstream_count = len(downstream)
+                    root_cause_debug.append(f"{service}: {downstream_count} downstream")
         
         root_cause_services_str = ', '.join(root_cause_services[:3]) if root_cause_services else 'None identified'
+        
+        # Debug logging for cluster analysis
+        if cluster_id <= 5:  # Only log first 5 clusters for debugging
+            print(f"\n      DEBUG Cluster {cluster_id}:")
+            print(f"        Services with alerts: {len(set(services))}")
+            print(f"        Downstream analysis: {', '.join(root_cause_debug[:5])}")
+            print(f"        Root cause services: {root_cause_services_str}")
+            print(f"        Affected services count: {affected_count}")
         
         return {
             'primary_services': primary_services_str,
@@ -2323,9 +2456,26 @@ class ComprehensiveAlertConsolidator:
         print("\n" + "=" * 70)
         print("CONSOLIDATION COMPLETE!")
         print("=" * 70)
-        print(f"Total alerts processed: {len(self.enriched_alerts)}")
-        print(f"Unique alerts (after dedup): {len(self.deduplicated_alerts)}")
-        print(f"Final groups/clusters: {len(set(df_output['final_group_id']))}")
+        print(f"\nAlert Flow Summary:")
+        print(f"  1. Firing alerts loaded: {len(self.firing_alerts)}")
+        print(f"  2. After enrichment: {len(self.enriched_alerts)}")
+        
+        total_in_groups = sum(len(g['alerts']) for g in self.consolidated_groups)
+        print(f"  3. In consolidated groups: {total_in_groups}")
+        
+        if hasattr(self, 'deduplicated_alerts'):
+            print(f"  4. After deduplication: {len(self.deduplicated_alerts)}")
+            dedup_rate = ((total_in_groups - len(self.deduplicated_alerts)) / total_in_groups * 100) if total_in_groups > 0 else 0
+            print(f"     Deduplication rate: {dedup_rate:.1f}%")
+        
+        print(f"  5. Final clusters: {len(set(df_output['final_group_id']))}")
+        
+        # Mapping statistics
+        mapped_count = len([a for a in self.enriched_alerts if a.get('graph_service')])
+        unmapped_count = len(self.enriched_alerts) - mapped_count
+        print(f"\nMapping Statistics:")
+        print(f"  Mapped to graph: {mapped_count} ({mapped_count/len(self.enriched_alerts)*100:.1f}%)")
+        print(f"  Unmapped: {unmapped_count} ({unmapped_count/len(self.enriched_alerts)*100:.1f}%)")
         
         print(f"\nKey Output Files:")
         print(f"  1. Cluster-Level Summary: cluster_level_summary.csv")
@@ -2621,6 +2771,8 @@ class ComprehensiveAlertConsolidator:
         print(f"    Unmapped: {unmapped_count}")
         
         self.enriched_alerts = self.firing_alerts
+        
+        print(f"\n    Total enriched alerts: {len(self.enriched_alerts)}")
         self._group_alerts_by_relationships()  # Includes deduplication in Phase 4.5
         self._create_consolidated_output()
         self._engineer_features()  # Works on deduplicated alerts only
