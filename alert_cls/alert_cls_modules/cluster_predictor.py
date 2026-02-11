@@ -1,47 +1,44 @@
-"""
-Cluster Predictor
-
-Predicts cluster assignments for new alerts using a trained model.
-"""
 
 import numpy as np
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 
 class ClusterPredictor:
-    """Assign new alerts to existing clusters using trained model"""
     
-    def __init__(self, model_manager):
+    EXPECTED_FEATURE_NAMES = None
+    
+    def __init__(self, model_manager, catalog_manager=None):
         self.model_manager = model_manager
+        self.catalog_manager = catalog_manager
         self.loaded_model = None
         self.model_version = None
-    
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++
+    # checked
     def load_current_model(self):
-        """Load the current production model"""
         if self.loaded_model is None:
             self.loaded_model = self.model_manager.load_model()
             self.model_version = self.loaded_model['metadata']['version']
+            self.EXPECTED_FEATURE_NAMES = self.loaded_model['metadata'].get('feature_names', [])
     
+    # +++++++++++++++++++++++++++++++++++++++++++++++++++
+    # checked
     def predict_clusters(self, feature_matrix_scaled: np.ndarray) -> Tuple[np.ndarray, str, float]:
-        """
-        Predict cluster assignments for new alerts
-        
-        Returns:
-            - cluster_labels: np.ndarray of cluster assignments
-            - clustering_method: str name of the clustering algorithm
-            - confidence_scores: confidence score
-        """
-        # Ensure model is loaded
         if self.loaded_model is None:
             self.load_current_model()
         
         model = self.loaded_model['model']
         metadata = self.loaded_model['metadata']
         
-        # Predict cluster assignments
-        cluster_labels = model.predict(feature_matrix_scaled)
+        expected_features = metadata.get('pca_components', metadata.get('feature_count', None))
+        actual_features = feature_matrix_scaled.shape[1]
         
-        # Calculate average confidence if model has cluster centers
+        if expected_features and expected_features != actual_features:
+            raise ValueError(
+                f"Feature mismatch! Model expects {expected_features} PCA components, "
+                f"but got {actual_features}. This indicates the model needs retraining."
+            )
+        
+        cluster_labels = model.predict(feature_matrix_scaled)
         avg_confidence = None
         if hasattr(model, 'cluster_centers_'):
             confidences = []
@@ -54,9 +51,22 @@ class ClusterPredictor:
             print(f"  Average confidence: {avg_confidence:.3f}")
         
         return cluster_labels, metadata['algorithm'], avg_confidence
+    # ++++++++++++++++++++++++++++++++++++++++++++++++++
+    # todo: need to bug this, this must be used in job scheduler
+    # def predict_for_unmatched(self, unmatched_alerts: List[Dict], 
+    #                          feature_matrix_scaled: np.ndarray) -> np.ndarray:
+    #     if len(unmatched_alerts) == 0:
+    #         return np.array([])
+        
+    #     next_cluster_id = 0
+    #     if self.catalog_manager:
+    #         next_cluster_id = self.catalog_manager.next_cluster_id
+        
+    #     cluster_labels, _, _ = self.predict_clusters(feature_matrix_scaled)
+    #     cluster_labels = cluster_labels + next_cluster_id
+    #     return cluster_labels
     
-    def _calculate_confidence(self, feature_vector: np.ndarray, predicted_cluster: int) -> float:
-        """Calculate confidence score based on distance to cluster center"""
+    def _calculate_confidence(self, feature_vector: np.ndarray, predicted_cluster: int) -> Optional[float]:
         model = self.loaded_model['model']
         
         if not hasattr(model, 'cluster_centers_'):
@@ -64,34 +74,63 @@ class ClusterPredictor:
         
         center = model.cluster_centers_[predicted_cluster]
         distance = np.linalg.norm(feature_vector - center)
-        
-        # Normalize to 0-1 (closer = higher confidence)
         all_distances = [np.linalg.norm(feature_vector - c) for c in model.cluster_centers_]
         max_dist = max(all_distances)
         confidence = 1 - (distance / max_dist) if max_dist > 0 else 1.0
         
         return round(confidence, 3)
-    
-    def get_cluster_profile(self, cluster_id: int) -> Dict:
-        """Get the profile/characteristics of a specific cluster"""
-        if self.loaded_model is None:
-            self.load_current_model()
+    # ++++++++++++++++++++++++++++++++++++++++++++++++++
+    # NOTE: redundant method, can be removed later if not needed, as we may not need to get profile info at this time, but can be added back later if needed
+    # def get_cluster_profile(self, cluster_id: int) -> Dict:
+    #     if self.loaded_model is None:
+    #         self.load_current_model()
         
-        profiles = self.loaded_model['profiles']
-        return profiles.get(str(cluster_id), {})
+    #     profiles = self.loaded_model['profiles']
+    #     return profiles.get(str(cluster_id), {})
     
-    def get_all_cluster_profiles(self) -> Dict:
-        """Get profiles for all clusters"""
-        if self.loaded_model is None:
-            self.load_current_model()
+    # ++++++++++++++++++++++++++++++++++++++++++++++++++
+    # redundant method, can be removed later if not needed
+    # def get_all_cluster_profiles(self) -> Dict:
+    #     if self.loaded_model is None:
+    #         self.load_current_model()
         
-        return self.loaded_model['profiles']
+    #     return self.loaded_model['profiles']
     
+    # ++++++++++++++++++++++++++++++++++++++++++++++++++
+    # checked and being called in job scheduler, make sure the model is reloaded after retraining
     def reload_model(self, version: int = None):
-        """Reload model ( after retraining cluster model)"""
         self.loaded_model = None
         if version:
             self.loaded_model = self.model_manager.load_model(version)
             self.model_version = version
+            self.EXPECTED_FEATURE_NAMES = self.loaded_model['metadata'].get('feature_names', [])
         else:
             self.load_current_model()
+    # ++++++++++++++++++++++++++++++++++++++++++++++++++
+    # used for test case but in job scheduler
+    def get_expected_features(self) -> List[str]:
+        if self.EXPECTED_FEATURE_NAMES is None:
+            self.load_current_model()
+        return self.EXPECTED_FEATURE_NAMES
+    
+    def validate_features(self, feature_names: List[str], feature_matrix: np.ndarray) -> bool:
+        expected = self.get_expected_features()
+        
+        if not expected:
+            return True
+        
+        if len(expected) != len(feature_names):
+            print(f"  Feature count mismatch: expected {len(expected)}, got {len(feature_names)}")
+            return False
+        
+        if expected != feature_names:
+            print("  Feature names mismatch!")
+            print(f"    Expected: {expected}")
+            print(f"    Got: {feature_names}")
+            return False
+        
+        if feature_matrix.shape[1] != len(expected):
+            print(f"  Feature matrix shape mismatch: expected {len(expected)} features, got {feature_matrix.shape[1]}")
+            return False
+        
+        return True
