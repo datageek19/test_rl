@@ -1,229 +1,607 @@
-"""
-Result Storage
-
-    Handles persistence of clustering results, metrics, and outputs.
-"""
 
 import pandas as pd
 import os
 import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from collections import Counter
+import networkx as nx
+import numpy as np
+
+from config import Config
+
+
+def convert_to_json_serializable(obj):
+    """Convert non-JSON-serializable objects to serializable formats."""
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    elif isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_to_json_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_json_serializable(item) for item in obj]
+    else:
+        return obj
 
 
 class ResultStorage:
-    """Store and manage clustering results"""
     
-    def __init__(self, output_dir='results'):
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+    def __init__(self, output_dir='results', service_graph=None, consolidated_groups=None, catalog_manager=None):
+
+        self.output_dir = Config.ARTIFACTS_DIR or output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.service_graph = service_graph
+        self.consolidated_groups = consolidated_groups or []
+        self.catalog_manager = catalog_manager
+        self._pagerank_cache = {}
+        self._betweenness_cache = {}
+        
+        if self.service_graph and len(self.service_graph.nodes()) > 0:
+            self._compute_graph_metrics()
+    
+    def set_graph_context(self, service_graph, consolidated_groups=None, 
+                          pagerank_cache=None, betweenness_cache=None, catalog_manager=None):
+        self.service_graph = service_graph
+        self.consolidated_groups = consolidated_groups or []
+        if catalog_manager:
+            self.catalog_manager = catalog_manager
+        
+        if pagerank_cache:
+            self._pagerank_cache = pagerank_cache
+        elif self.service_graph and len(self.service_graph.nodes()) > 0:
+            try:
+                self._pagerank_cache = nx.pagerank(self.service_graph, alpha=0.85)
+            except Exception as e:
+                print(f"  Warning: Could not compute pagerank: {e}")
+                self._pagerank_cache = {}
+        
+        if betweenness_cache:
+            self._betweenness_cache = betweenness_cache
+        elif self.service_graph and len(self.service_graph.nodes()) > 0:
+            try:
+                self._betweenness_cache = nx.betweenness_centrality(self.service_graph)
+            except Exception as e:
+                print(f"  Warning: Could not compute betweenness: {e}")
+                self._betweenness_cache = {}
+    
+    def _compute_graph_metrics(self):
+        if not self.service_graph or len(self.service_graph.nodes()) == 0:
+            return
+        try:
+            self._pagerank_cache = nx.pagerank(self.service_graph, alpha=0.85)
+            self._betweenness_cache = nx.betweenness_centrality(self.service_graph)
+        except Exception as e:
+            print(f"  Warning: Could not compute graph metrics: {e}")
     
     def save_results(self, run_id: str, enriched_alerts: List[Dict], 
                     cluster_metadata: List[Dict], deduplicated_alerts: List[Dict],
-                    clustering_stats: Dict) -> Dict[str, str]:
-        """Save all results for a workflow run"""
-        
-        # Create run-specific directory
-        run_dir = f'{self.output_dir}/{run_id}'
+                    clustering_stats: Dict, duplicate_groups: List[Dict] = None,
+                    duplicate_alerts: List[Dict] = None) -> Dict[str, str]:
+        run_dir = os.path.join(self.output_dir, run_id)
         os.makedirs(run_dir, exist_ok=True)
         
         output_paths = {}
+        output_paths['level1'] = self._export_level1_cluster_view(run_dir, deduplicated_alerts)
+        output_paths['level2'] = self._export_level2_alert_view(run_dir, deduplicated_alerts)
         
-        # Save main consolidated alerts
-        output_paths['main'] = self._save_consolidated_alerts(run_dir, enriched_alerts)
-        
-        # Save cluster summary
-        output_paths['cluster_summary'] = self._save_cluster_summary(run_dir, cluster_metadata)
-        
-        # Save ranked clusters
-        output_paths['ranked_clusters'] = self._save_ranked_clusters(run_dir, cluster_metadata)
-        
-        # Save deduplicated alerts
-        output_paths['deduplicated'] = self._save_deduplicated_alerts(run_dir, deduplicated_alerts)
-        
-        # Save detailed cluster view
-        output_paths['cluster_detail'] = self._save_cluster_detail_view(run_dir, enriched_alerts, cluster_metadata)
-        
-        # Save clustering statistics
         output_paths['stats'] = self._save_clustering_stats(run_dir, clustering_stats)
-        
-        # Save mapping statistics
         output_paths['mapping'] = self._save_mapping_stats(run_dir, enriched_alerts)
-        
-        # Save run metadata
         output_paths['metadata'] = self._save_run_metadata(run_dir, run_id, enriched_alerts, cluster_metadata)
+        
+        if duplicate_groups:
+            output_paths['duplicates'] = self._save_duplicate_groups(run_dir, duplicate_groups)
+        
+        if duplicate_alerts:
+            output_paths['duplicate_alerts'] = self._save_duplicate_alerts_list(run_dir, duplicate_alerts)
         
         print(f"  Results saved to: {run_dir}")
         return output_paths
     
-    def _save_consolidated_alerts(self, run_dir: str, enriched_alerts: List[Dict]) -> str:
-        """Save main consolidated alerts"""
-        output_data = []
+    def _get_transitive_downstream(self, service_name: str, max_depth: int = 2) -> set:
+        impacted = set()
+        if not self.service_graph or not self.service_graph.has_node(service_name):
+            return impacted
         
-        for i, alert in enumerate(enriched_alerts):
-            output_data.append({
-                'alert_id': i,
-                'final_group_id': alert.get('cluster_id', -1),
-                'initial_group_id': alert.get('initial_group_id', -1),
-                'clustering_method': alert.get('clustering_method', ''),
-                'is_duplicate': alert.get('is_duplicate', False),
-                'duplicate_of': alert.get('duplicate_of', ''),
-                
-                # Cluster info
-                'cluster_name': alert.get('cluster_name', ''),
-                'cluster_rank': alert.get('cluster_rank', -1),
-                'cluster_score': alert.get('cluster_score', 0),
-                
-                # Alert info
-                'alert_name': alert.get('alert_name', ''),
-                'severity': alert.get('severity', ''),
-                'service_name': alert.get('service_name', ''),
-                'namespace': alert.get('namespace', ''),
-                'cluster': alert.get('cluster', ''),
-                'pod': alert.get('pod', ''),
-                'node': alert.get('node', ''),
-                
-                # Graph mapping
-                'graph_service': alert.get('graph_service', ''),
-                'mapping_method': alert.get('mapping_method', ''),
-                'mapping_confidence': alert.get('mapping_confidence', 0),
-                
-                # Temporal
-                'starts_at': alert.get('startsAt', ''),
-                'start_timestamp': alert.get('start_timestamp', 0),
-                
-                # Metadata
-                'alert_category': alert.get('alert_category', ''),
-                'alert_subcategory': alert.get('alert_subcategory', ''),
-                'workload_type': alert.get('workload_type', ''),
-                'description': alert.get('description', ''),
-            })
+        visited = set()
+        queue = [(service_name, 0)]
         
-        df_output = pd.DataFrame(output_data)
-        output_path = f'{run_dir}/alert_consolidation_final.csv'
-        df_output.to_csv(output_path, index=False)
-        
-        return output_path
-    
-    def _save_cluster_summary(self, run_dir: str, cluster_metadata: List[Dict]) -> str:
-        """Save cluster summary"""
-        df_summary = pd.DataFrame(cluster_metadata)
-        if not df_summary.empty:
-            df_summary = df_summary.sort_values('ranking_score', ascending=False)
-        
-        output_path = f'{run_dir}/cluster_summary.csv'
-        df_summary.to_csv(output_path, index=False)
-        
-        return output_path
-    
-    def _save_ranked_clusters(self, run_dir: str, cluster_metadata: List[Dict]) -> str:
-        """Save ranked clusters"""
-        df_ranked = pd.DataFrame(cluster_metadata)
-        output_path = f'{run_dir}/ranked_clusters.csv'
-        df_ranked.to_csv(output_path, index=False)
-        
-        return output_path
-    
-    def _save_deduplicated_alerts(self, run_dir: str, deduplicated_alerts: List[Dict]) -> str:
-        """Save deduplicated alerts"""
-        dedup_data = []
-        
-        for alert in deduplicated_alerts:
-            dedup_data.append({
-                'alert_name': alert.get('alert_name', ''),
-                'service_name': alert.get('service_name', ''),
-                'graph_service': alert.get('graph_service', ''),
-                'cluster_id': alert.get('cluster_id', -1),
-                'cluster_name': alert.get('cluster_name', ''),
-                'namespace': alert.get('namespace', ''),
-                'cluster': alert.get('cluster', ''),
-                'severity': alert.get('severity', ''),
-                'alert_category': alert.get('alert_category', ''),
-                'alert_subcategory': alert.get('alert_subcategory', ''),
-                'starts_at': alert.get('startsAt', ''),
-            })
-        
-        df_dedup = pd.DataFrame(dedup_data)
-        output_path = f'{run_dir}/deduplicated_alerts.csv'
-        df_dedup.to_csv(output_path, index=False)
-        
-        return output_path
-    
-    def _save_cluster_detail_view(self, run_dir: str, enriched_alerts: List[Dict], 
-                                  cluster_metadata: List[Dict]) -> str:
-        """Save detailed cluster-based view"""
-        ranked_dict = {meta['cluster_id']: meta for meta in cluster_metadata}
-        
-        cluster_details = []
-        
-        for alert in enriched_alerts:
-            cluster_id = alert.get('cluster_id', -1)
+        while queue:
+            current, depth = queue.pop(0)
+            if current in visited or depth > max_depth:
+                continue
+            visited.add(current)
             
+            if depth > 0:
+                impacted.add(current)
+            
+            for successor in self.service_graph.successors(current):
+                if successor not in visited:
+                    queue.append((successor, depth + 1))
+        
+        return impacted
+    
+    def _save_duplicate_groups(self, run_dir: str, duplicate_groups: List[Dict]) -> str:
+        output_path = os.path.join(run_dir, 'duplicate_groups.json')
+        
+        duplicate_data = {
+            'total_duplicate_groups': len(duplicate_groups),
+            'total_duplicates': sum(g['count'] - 1 for g in duplicate_groups),
+            'groups': convert_to_json_serializable(duplicate_groups)
+        }
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(duplicate_data, f, indent=2, ensure_ascii=False)
+        
+        return output_path
+    
+    def _save_duplicate_alerts_list(self, run_dir: str, duplicate_alerts: List[Dict]) -> str:
+        output_path = os.path.join(run_dir, 'duplicate_alerts_list.json')
+        
+        duplicate_data = {
+            'total_duplicate_alerts': len(duplicate_alerts),
+            'alerts': convert_to_json_serializable(duplicate_alerts)
+        }
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(duplicate_data, f, indent=2, ensure_ascii=False)
+        
+        return output_path
+    
+    def _compute_cluster_graph_metrics(self, cluster_services: list, alerts: list) -> dict:
+        metrics = {
+            'impacted_services': [],
+            'blast_radius': 0,
+            'root_cause_services': [],
+            'root_cause_description': '',
+            'impact_propagation_score': 0.0,
+            'criticality_score': 0.0
+        }
+        
+        if not self.service_graph or not cluster_services:
+            return metrics
+        
+        all_impacted = set()
+        service_blast_radii = []
+        
+        for svc in cluster_services:
+            if self.service_graph.has_node(svc):
+                impacted = self._get_transitive_downstream(svc, max_depth=2)
+                all_impacted.update(impacted)
+                service_blast_radii.append({'service': svc, 'blast_radius': len(impacted)})
+        
+        metrics['impacted_services'] = list(all_impacted)
+        metrics['blast_radius'] = len(all_impacted)
+        
+        service_blast_radii.sort(key=lambda x: x['blast_radius'], reverse=True)
+        root_causes = [s for s in service_blast_radii if s['blast_radius'] >= 3][:3]
+        metrics['root_cause_services'] = [rc['service'] for rc in root_causes]
+        
+        if root_causes:
+            top_rc = root_causes[0]
+            metrics['root_cause_description'] = f"{top_rc['service']} (impacts {top_rc['blast_radius']} downstream services)"
+        else:
+            metrics['root_cause_description'] = 'No high-impact root cause identified'
+        
+        blast_score = min(metrics['blast_radius'] / 20.0, 1.0) * 40
+        
+        severities = [a.get('severity', '').lower() for a in alerts]
+        severity_weights = {'critical': 1.0, 'high': 0.75, 'warning': 0.5, 'info': 0.25}
+        avg_severity = sum(severity_weights.get(s, 0) for s in severities) / len(severities) if severities else 0
+        severity_score = avg_severity * 40
+        
+        service_score = min(len(cluster_services) / 5.0, 1.0) * 20
+        
+        metrics['impact_propagation_score'] = round(blast_score + severity_score + service_score, 2)
+        
+        pagerank_sum = 0.0
+        degree_sum = 0
+        valid_services = 0
+        
+        for svc in cluster_services:
+            if self.service_graph.has_node(svc):
+                if self._pagerank_cache and svc in self._pagerank_cache:
+                    pagerank_sum += self._pagerank_cache[svc]
+                degree_sum += self.service_graph.degree(svc)
+                valid_services += 1
+        
+        avg_pagerank = pagerank_sum / valid_services if valid_services > 0 else 0
+        avg_degree = degree_sum / valid_services if valid_services > 0 else 0
+        
+        pagerank_score = min(avg_pagerank * 5000, 35)
+        degree_score = min(avg_degree / 30.0, 1.0) * 25
+        alert_score = min(len(alerts) / 30.0, 1.0) * 40
+        
+        metrics['criticality_score'] = round(pagerank_score + degree_score + alert_score, 2)
+        
+        return metrics
+    
+    def _export_level1_cluster_view(self, run_dir: str, deduplicated_alerts: List[Dict]) -> str:
+        from datetime import datetime, timezone
+        
+        print("    Generating Level 1: Cluster-Level View...")
+        
+        cluster_data = []
+        
+        cluster_alerts_dict = {}
+        for alert in deduplicated_alerts:
+            cluster_id = alert.get('cluster_id', -1)
             if cluster_id == -1:
                 continue
+            if cluster_id not in cluster_alerts_dict:
+                cluster_alerts_dict[cluster_id] = []
+            cluster_alerts_dict[cluster_id].append(alert)
+        
+        for cluster_id in sorted(cluster_alerts_dict.keys(), key=lambda x: str(x)):
+            alerts = cluster_alerts_dict[cluster_id]
             
-            cluster_meta = ranked_dict.get(cluster_id, {})
-            graph_info = alert.get('graph_info', {})
-            dependencies = alert.get('dependencies', {})
+            cluster_name = alerts[0].get('cluster_name', f'cluster_{cluster_id}') if alerts else f'cluster_{cluster_id}'
+            cluster_rank = alerts[0].get('cluster_rank', -1) if alerts else -1
+            cluster_score = alerts[0].get('cluster_score', 0) if alerts else 0
             
-            alert_detail = {
-                # Cluster metadata
-                'cluster_id': cluster_id,
-                'cluster_name': cluster_meta.get('cluster_name', f'cluster_{cluster_id}'),
-                'cluster_rank': cluster_meta.get('rank', -1),
-                'cluster_score': cluster_meta.get('ranking_score', 0),
+            services = [a.get('graph_service', '') for a in alerts if a.get('graph_service')]
+            service_counts = Counter(services)
+            primary_services = [f"{svc} ({count})" for svc, count in service_counts.most_common(5)]
+            
+            unique_services = list(set(services))
+            
+            cluster_metrics = self._compute_cluster_graph_metrics(unique_services, alerts)
+            
+            impacted_services = cluster_metrics['impacted_services']
+            blast_radius = cluster_metrics['blast_radius']
+            root_cause_services = cluster_metrics['root_cause_services']
+            root_cause_description = cluster_metrics['root_cause_description']
+            impact_propagation_score = cluster_metrics['impact_propagation_score']
+            criticality_score = cluster_metrics['criticality_score']
+            
+            severities = [a.get('severity', '').lower() for a in alerts]
+            categories = [a.get('alert_category', '') for a in alerts if a.get('alert_category')]
+            subcategories = [a.get('alert_subcategory', '') for a in alerts if a.get('alert_subcategory')]
+            
+            severity_dist = Counter(severities)
+            category = Counter(categories).most_common(1)[0][0] if categories else 'unknown'
+            subcategory = Counter(subcategories).most_common(1)[0][0] if subcategories else ''
+       
+            primary_count = len(set(services)) if services else 0
+            primary_list = ', '.join([s.split('(')[0].strip() for s in primary_services[:5]]) if primary_services else 'none'
+            
+            impacted_count = len(impacted_services) if impacted_services else 0
+            impacted_list = ', '.join(impacted_services[:5]) if impacted_services else 'none'
+            
+            root_cause_count = len(root_cause_services) if root_cause_services else 0
+            root_cause_list = ', '.join(root_cause_services[:5]) if root_cause_services else 'none identified'
+            
+            top_service = service_counts.most_common(1)[0][0] if service_counts else None
+            
+            downstream_count = 0
+            upstream_count = 0
+            service_found_in_graph = False
+            
+            if top_service and self.service_graph and self.service_graph.has_node(top_service):
+                service_found_in_graph = True
+                downstream_count = len(list(self.service_graph.successors(top_service)))
+                upstream_count = len(list(self.service_graph.predecessors(top_service)))
+            
+            if not top_service:
+                cluster_description_detailed = "Observing issues with unknown service name (not found), no upstream or downstream dependencies found"
+            elif not service_found_in_graph:
+                cluster_description_detailed = f"Observing issues with {top_service} (not found in service graph), no upstream or downstream dependencies found"
+            elif upstream_count == 0 and downstream_count == 0:
+                cluster_description_detailed = f"Observing issues with {top_service}, no upstream or downstream dependencies found"
+            else:
+                dependency_parts = []
+                if upstream_count > 0:
+                    dependency_parts.append(f"{upstream_count} upstream")
+                if downstream_count > 0:
+                    dependency_parts.append(f"{downstream_count} downstream")
+                dependency_str = " and ".join(dependency_parts) + " dependencies"
+                cluster_description_detailed = f"Observing issues with {top_service}, where {dependency_str}"
+            
+            created_ts = datetime.now(tz=timezone.utc)
+            
+            all_timestamps = []
+            for a in alerts:
+                ts = a.get('start_timestamp')
+                if ts and ts > 0:
+                    all_timestamps.append(ts)
+                    continue
                 
-                # Alert identity
+                start_dt = a.get('start_datetime')
+                if start_dt and pd.notna(start_dt):
+                    try:
+                        all_timestamps.append(pd.Timestamp(start_dt).timestamp())
+                        continue
+                    except:
+                        pass
+                
+                starts_at = a.get('startsAt') or a.get('starts_at')
+                if starts_at:
+                    try:
+                        all_timestamps.append(pd.to_datetime(starts_at).timestamp())
+                        continue
+                    except:
+                        pass
+                
+                ends_at = a.get('endsAt') or a.get('ends_at')
+                if ends_at:
+                    try:
+                        all_timestamps.append(pd.to_datetime(ends_at).timestamp())
+                        continue
+                    except:
+                        pass
+                
+                updated_at = a.get('updatedAt') or a.get('updated_at')
+                if updated_at:
+                    try:
+                        all_timestamps.append(pd.to_datetime(updated_at).timestamp())
+                    except:
+                        pass
+            
+            if all_timestamps:
+                start_ts = datetime.fromtimestamp(min(all_timestamps), tz=timezone.utc)
+                end_ts = datetime.fromtimestamp(max(all_timestamps), tz=timezone.utc)
+            else:
+                start_ts = None
+                end_ts = None
+            
+            current_alert_ids = [a.get('_id', '') or a.get('alert_id', '') for a in alerts if a.get('_id') or a.get('alert_id')]
+            
+            catalog_alert_ids = []
+            catalog_issue_id = None
+            if hasattr(self, 'catalog_manager') and self.catalog_manager:
+                catalog_entry = self.catalog_manager.cluster_catalog.get(cluster_id, {})
+                issue_data = catalog_entry.get('issue', {})
+                if issue_data:
+                    catalog_alert_ids = issue_data.get('child_alert_ids', [])
+                    catalog_issue_id = issue_data.get('issue_id')
+                else:
+                    catalog_alert_ids = catalog_entry.get('child_alert_ids', []) or catalog_entry.get('_ids', [])
+                    catalog_issue_id = catalog_entry.get('issue_id')
+            
+            all_child_alert_ids = list(set(current_alert_ids + catalog_alert_ids))
+            
+            if catalog_issue_id:
+                issue_id = catalog_issue_id
+            else:
+                category_abbr = category[:3].upper() if category else 'UNK'
+                service_abbr = top_service[:8].upper().replace('-', '').replace('_', '') if top_service else 'UNK'
+                issue_id = f"ISS-{category_abbr}-{service_abbr}-{cluster_id}"
+            
+            cluster_data.append({
+                'cluster_rank': cluster_rank,
+                'cluster_id': cluster_id,
+                'issue_id': issue_id,
+                'cluster_name': cluster_name,
+                'cluster_score': cluster_score,
+                'cluster_description_detailed': cluster_description_detailed,
+                'created_ts': created_ts,
+                'start_ts': start_ts,
+                'end_ts': end_ts,
+                'current_alert_count': len(alerts),
+                'unique_alert_types': len(set(a.get('alert_name', '') for a in alerts)),
+                'primary_services': ', '.join(primary_services) if primary_services else 'unmapped',
+                'primary_service_count': len(set(services)),
+                'impacted_services': ', '.join(impacted_services[:10]) if impacted_services else 'none',
+                'impacted_services_count': len(impacted_services),
+                'blast_radius': blast_radius,
+                'root_cause_services': ', '.join(root_cause_services) if root_cause_services else 'none identified',
+                'root_cause_description': root_cause_description,
+                'impact_propagation_score': impact_propagation_score,
+                'criticality_score': criticality_score,
+                'severity_distribution': str(dict(severity_dist)),
+                'most_common_category': category,
+                'most_common_subcategory': subcategory,
+                'namespaces': ', '.join(sorted(set(a.get('namespace', '') for a in alerts if a.get('namespace')))[:5]),
+                'clustering_method': alerts[0].get('clustering_method', '') if alerts else ''
+            })
+        
+        df_level1 = pd.DataFrame(cluster_data)
+        if not df_level1.empty:
+            df_level1 = df_level1.sort_values('cluster_rank')
+        
+        level1_path = f'{run_dir}/cluster_level_view.csv'
+        df_level1.to_csv(level1_path, index=False)
+        print(f"    Level 1 - Cluster View: {level1_path}")
+        
+        return level1_path
+    
+    def _export_level2_alert_view(self, run_dir: str, deduplicated_alerts: List[Dict]) -> str:
+        print("    Generating Level 2: Alert Detail View...")
+        
+        alert_data = []
+        
+        for alert in deduplicated_alerts:
+            graph_service = alert.get('graph_service', '')
+            
+            service_metrics = self._calculate_service_graph_metrics(graph_service)
+            
+            impact_propagation_score = self._compute_alert_impact_score(graph_service, alert)
+            criticality_score = self._compute_alert_criticality_score(alert, service_metrics)
+            
+            alert_data.append({
+                'cluster_rank': alert.get('cluster_rank', -1),
+                'cluster_id': alert.get('cluster_id', -1),
+                'cluster_name': alert.get('cluster_name', ''),
+                
                 'alert_name': alert.get('alert_name', ''),
                 'severity': alert.get('severity', ''),
                 'alert_category': alert.get('alert_category', ''),
                 'alert_subcategory': alert.get('alert_subcategory', ''),
                 'description': alert.get('description', ''),
                 
-                # Alert location
                 'service_name': alert.get('service_name', ''),
+                'graph_service': graph_service,
                 'namespace': alert.get('namespace', ''),
-                'pod': alert.get('pod', ''),
-                'node': alert.get('node', ''),
                 'cluster': alert.get('cluster', ''),
                 
-                # Service graph information
-                'graph_service': alert.get('graph_service', ''),
-                'graph_service_type': graph_info.get('type', '') if graph_info else '',
-                'upstream_services': ', '.join([d['service'] for d in dependencies.get('upstream', [])]),
-                'downstream_services': ', '.join([d['service'] for d in dependencies.get('downstream', [])]),
-                'upstream_count': len(dependencies.get('upstream', [])),
-                'downstream_count': len(dependencies.get('downstream', [])),
+                'pagerank': service_metrics['pagerank'],
+                'betweenness': service_metrics['betweenness'],
+                'degree': service_metrics['degree'],
+                'in_degree': service_metrics['in_degree'],
+                'out_degree': service_metrics['out_degree'],
+                'blast_radius': service_metrics['blast_radius'],
+                'impacted_services': ', '.join(service_metrics['impacted_services'][:10]),
+                'impacted_count': len(service_metrics['impacted_services']),
+                'upstream_services': ', '.join(service_metrics['upstream_services'][:5]),
+                'upstream_count': len(service_metrics['upstream_services']),
+                'downstream_services': ', '.join(service_metrics['downstream_services'][:5]),
+                'downstream_count': len(service_metrics['downstream_services']),
                 
-                # Mapping info
+                'impact_propagation_score': impact_propagation_score,
+                'criticality_score': criticality_score,
+                
                 'mapping_method': alert.get('mapping_method', ''),
                 'mapping_confidence': alert.get('mapping_confidence', 0),
+                'clustering_method': alert.get('clustering_method', ''),
                 
-                # Temporal
                 'starts_at': alert.get('startsAt', ''),
                 'start_timestamp': alert.get('start_timestamp', 0),
-                
-                # Additional metadata
-                'workload_type': alert.get('workload_type', ''),
-                'is_duplicate': alert.get('is_duplicate', False),
-            }
+            })
+        
+        df_level2 = pd.DataFrame(alert_data)
+        if not df_level2.empty:
+            df_level2 = df_level2.sort_values(['cluster_rank', 'cluster_id', 'start_timestamp'])
+        
+        level2_path = f'{run_dir}/alert_detail_view.csv'
+        df_level2.to_csv(level2_path, index=False)
+        print(f"    Level 2 - Alert Detail View: {level2_path}")
+        
+        return level2_path
+    
+    def _calculate_service_graph_metrics(self, service_name):
+        metrics = {
+            'pagerank': 0.0,
+            'betweenness': 0.0,
+            'degree': 0,
+            'in_degree': 0,
+            'out_degree': 0,
+            'blast_radius': 0,
+            'impacted_services': [],
+            'upstream_services': [],
+            'downstream_services': []
+        }
+        
+        if not service_name or not self.service_graph or not self.service_graph.has_node(service_name):
+            return metrics
+        
+        if self._pagerank_cache and service_name in self._pagerank_cache:
+            metrics['pagerank'] = round(self._pagerank_cache[service_name], 6)
+        
+        if self._betweenness_cache and service_name in self._betweenness_cache:
+            metrics['betweenness'] = round(self._betweenness_cache[service_name], 6)
+        
+        metrics['degree'] = self.service_graph.degree(service_name)
+        metrics['in_degree'] = self.service_graph.in_degree(service_name)
+        metrics['out_degree'] = self.service_graph.out_degree(service_name)
+        
+        metrics['upstream_services'] = list(self.service_graph.predecessors(service_name))
+        
+        metrics['downstream_services'] = list(self.service_graph.successors(service_name))
+        
+        impacted = self._get_transitive_downstream(service_name, max_depth=2)
+        metrics['impacted_services'] = list(impacted)
+        metrics['blast_radius'] = len(impacted)
+        
+        return metrics
+    
+    def _compute_alert_impact_score(self, service_name: str, alert: dict) -> float:
+        severity = alert.get('severity', '').lower()
+        severity_weights = {'critical': 1.0, 'high': 0.75, 'warning': 0.5, 'medium': 0.5, 'low': 0.25, 'info': 0.1}
+        severity_score = severity_weights.get(severity, 0.25) * 40
+        
+        if not service_name or not self.service_graph:
+            return round(severity_score + 15, 2)
+        
+        if not self.service_graph.has_node(service_name):
+            return round(severity_score + 10, 2)
+        
+        impacted = self._get_transitive_downstream(service_name, max_depth=2)
+        blast_radius = len(impacted)
+        if blast_radius == 0:
+            blast_score = 5
+        elif blast_radius <= 3:
+            blast_score = 10 + (blast_radius * 3)
+        elif blast_radius <= 10:
+            blast_score = 20 + ((blast_radius - 3) * 1.5)
+        else:
+            blast_score = 30
+        
+        degree = self.service_graph.degree(service_name)
+        in_degree = self.service_graph.in_degree(service_name)
+        out_degree = self.service_graph.out_degree(service_name)
+        
+        if out_degree == 0:
+            connectivity_score = 5
+        elif out_degree <= 3:
+            connectivity_score = 10 + (out_degree * 2)
+        elif out_degree <= 10:
+            connectivity_score = 16 + ((out_degree - 3) * 1.5)
+        else:
+            connectivity_score = 30
+        
+        return round(blast_score + severity_score + connectivity_score, 2)
+    
+    def _compute_alert_criticality_score(self, alert: dict, service_metrics: dict) -> float:
+        severity = alert.get('severity', '').lower()
+        severity_weights = {'critical': 1.0, 'high': 0.75, 'warning': 0.5, 'medium': 0.5, 'low': 0.25, 'info': 0.1}
+        severity_score = severity_weights.get(severity, 0.25) * 40
+        
+        pagerank = service_metrics.get('pagerank', 0.0)
+        if pagerank <= 0:
+            pagerank_score = 5
+        elif pagerank < 0.01:
+            pagerank_score = 8 + (pagerank * 700)
+        elif pagerank < 0.05:
+            pagerank_score = 15 + ((pagerank - 0.01) * 250)
+        else:
+            pagerank_score = 25
+        
+        degree = service_metrics.get('degree', 0)
+        in_degree = service_metrics.get('in_degree', 0)
+        
+        if degree == 0:
+            degree_score = 5
+        elif degree <= 5:
+            degree_score = 8 + (degree * 2)
+        elif degree <= 15:
+            degree_score = 18 + ((degree - 5) * 0.7)
+        else:
+            degree_score = 25
+        
+        if in_degree == 0:
+            upstream_score = 2
+        elif in_degree <= 3:
+            upstream_score = 4 + (in_degree * 1.5)
+        else:
+            upstream_score = 10
+        
+        return round(pagerank_score + degree_score + upstream_score + severity_score, 2)
+    
+    def _get_transitive_downstream(self, service_name, max_depth=2):
+        if not self.service_graph or not self.service_graph.has_node(service_name):
+            return set()
+        
+        visited = set()
+        queue = [(service_name, 0)]
+        
+        while queue:
+            current, depth = queue.pop(0)
             
-            cluster_details.append(alert_detail)
+            if depth >= max_depth:
+                continue
+            
+            for successor in self.service_graph.successors(current):
+                if successor not in visited:
+                    visited.add(successor)
+                    queue.append((successor, depth + 1))
         
-        df_details = pd.DataFrame(cluster_details)
-        
-        if not df_details.empty:
-            df_details = df_details.sort_values(['cluster_rank', 'cluster_id', 'start_timestamp'], 
-                                                 ascending=[True, True, True])
-        
-        output_path = f'{run_dir}/alerts_by_cluster_detailed.csv'
-        df_details.to_csv(output_path, index=False)
-        
-        return output_path
+        return visited
     
     def _save_clustering_stats(self, run_dir: str, clustering_stats: Dict) -> str:
-        """Save clustering statistics"""
         stats_converted = {}
         for key, value in clustering_stats.items():
             if hasattr(value, 'item'): 
@@ -240,7 +618,6 @@ class ResultStorage:
         return output_path
     
     def _save_mapping_stats(self, run_dir: str, enriched_alerts: List[Dict]) -> str:
-        """Save mapping statistics"""
         mapping_stats = {
             'direct': 0,
             'fallback': 0,
@@ -264,7 +641,6 @@ class ResultStorage:
     
     def _save_run_metadata(self, run_dir: str, run_id: str, enriched_alerts: List[Dict], 
                           cluster_metadata: List[Dict]) -> str:
-        """Save run metadata"""
         metadata = {
             'run_id': str(run_id),
             'timestamp': datetime.now().isoformat(),
@@ -281,8 +657,7 @@ class ResultStorage:
         
         return output_path
     
-    def get_latest_run_id(self) -> str:
-        """Get the most recent run ID"""
+    def get_latest_run_id(self) -> Optional[str]:
         if not os.path.exists(self.output_dir):
             return None
         
@@ -291,13 +666,10 @@ class ResultStorage:
         
         if not run_dirs:
             return None
-        
-        # Sort by timestamp (run_id format: YYYYMMDD_HHMMSS)
         run_dirs.sort(reverse=True)
         return run_dirs[0]
     
-    def load_run_results(self, run_id: str = None) -> Dict:
-        """Load results from a specific run (or latest)"""
+    def load_run_results(self, run_id: str = None) -> Optional[Dict]:
         if run_id is None:
             run_id = self.get_latest_run_id()
         
@@ -311,26 +683,22 @@ class ResultStorage:
         
         results = {
             'run_id': run_id,
-            'alerts': None,
-            'clusters': None,
+            'cluster_view': None,
+            'alert_detail': None,
             'metadata': None
         }
         
-        # Load main alerts
-        alerts_path = f'{run_dir}/alert_consolidation_final.csv'
-        if os.path.exists(alerts_path):
-            results['alerts'] = pd.read_csv(alerts_path)
+        level1_path = f'{run_dir}/cluster_level_view.csv'
+        if os.path.exists(level1_path):
+            results['cluster_view'] = pd.read_csv(level1_path)
         
-        # Load cluster summary
-        clusters_path = f'{run_dir}/cluster_summary.csv'
-        if os.path.exists(clusters_path):
-            results['clusters'] = pd.read_csv(clusters_path)
+        level2_path = f'{run_dir}/alert_detail_view.csv'
+        if os.path.exists(level2_path):
+            results['alert_detail'] = pd.read_csv(level2_path)
         
-        # Load metadata
         metadata_path = f'{run_dir}/run_metadata.json'
         if os.path.exists(metadata_path):
             with open(metadata_path, 'r') as f:
                 results['metadata'] = json.load(f)
         
         return results
-
