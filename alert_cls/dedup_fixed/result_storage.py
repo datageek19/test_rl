@@ -174,38 +174,6 @@ class ResultStorage:
         metrics['blast_radius'] = len(all_impacted)
         
         service_blast_radii.sort(key=lambda x: x['blast_radius'], reverse=True)
-        
-        blast_score = min(metrics['blast_radius'] / 20.0, 1.0) * 40
-        
-        severities = [a.get('severity', '').lower() for a in alerts]
-        severity_weights = {'critical': 1.0, 'high': 0.75, 'warning': 0.5, 'info': 0.25}
-        avg_severity = sum(severity_weights.get(s, 0) for s in severities) / len(severities) if severities else 0
-        severity_score = avg_severity * 40
-        
-        service_score = min(len(cluster_services) / 5.0, 1.0) * 20
-        
-        metrics['impact_propagation_score'] = round(blast_score + severity_score + service_score, 2)
-        
-        pagerank_sum = 0.0
-        degree_sum = 0
-        valid_services = 0
-        
-        for svc in cluster_services:
-            if self.service_graph.has_node(svc):
-                if self._pagerank_cache and svc in self._pagerank_cache:
-                    pagerank_sum += self._pagerank_cache[svc]
-                degree_sum += self.service_graph.degree(svc)
-                valid_services += 1
-        
-        avg_pagerank = pagerank_sum / valid_services if valid_services > 0 else 0
-        avg_degree = degree_sum / valid_services if valid_services > 0 else 0
-        
-        pagerank_score = min(avg_pagerank * 5000, 35)
-        degree_score = min(avg_degree / 30.0, 1.0) * 25
-        alert_score = min(len(alerts) / 30.0, 1.0) * 40
-        
-        metrics['criticality_score'] = round(pagerank_score + degree_score + alert_score, 2)
-        
         return metrics
     
     def _export_level1_cluster_view(self, run_dir: str, deduplicated_alerts: List[Dict]) -> str:
@@ -322,10 +290,7 @@ class ResultStorage:
             else:
                 start_ts = None
                 end_ts = None
-            
-            current_alert_ids = [a.get('_id', '') or a.get('alert_id', '') for a in alerts if a.get('_id') or a.get('alert_id')]
-            
-            
+    
             cluster_data.append({
                 'cluster_rank': cluster_rank,
                 'cluster_id': cluster_id,
@@ -368,10 +333,7 @@ class ResultStorage:
             graph_service = alert.get('graph_service', '')
             
             service_metrics = self._calculate_service_graph_metrics(graph_service)
-            
-            impact_propagation_score = self._compute_alert_impact_score(graph_service, alert)
-            criticality_score = self._compute_alert_criticality_score(alert, service_metrics)
-            
+          
             alert_data.append({
                 'cluster_rank': alert.get('cluster_rank', -1),
                 'cluster_id': alert.get('cluster_id', -1),
@@ -400,10 +362,6 @@ class ResultStorage:
                 'upstream_count': len(service_metrics['upstream_services']),
                 'downstream_services': ', '.join(service_metrics['downstream_services'][:5]),
                 'downstream_count': len(service_metrics['downstream_services']),
-                
-                'impact_propagation_score': impact_propagation_score,
-                'criticality_score': criticality_score,
-                
                 'mapping_method': alert.get('mapping_method', ''),
                 'mapping_confidence': alert.get('mapping_confidence', 0),
                 'clustering_method': alert.get('clustering_method', ''),
@@ -457,97 +415,6 @@ class ResultStorage:
         metrics['blast_radius'] = len(impacted)
         
         return metrics
-    
-    def _compute_alert_impact_score(self, service_name: str, alert: dict) -> float:
-        severity = alert.get('severity', '').lower()
-        severity_weights = {'critical': 1.0, 'high': 0.75, 'warning': 0.5, 'medium': 0.5, 'low': 0.25, 'info': 0.1}
-        severity_score = severity_weights.get(severity, 0.25) * 40
-        
-        if not service_name or not self.service_graph:
-            return round(severity_score + 15, 2)
-        
-        if not self.service_graph.has_node(service_name):
-            return round(severity_score + 10, 2)
-        
-        impacted = self._get_transitive_downstream(service_name, max_depth=2)
-        blast_radius = len(impacted)
-        if blast_radius == 0:
-            blast_score = 5
-        elif blast_radius <= 3:
-            blast_score = 10 + (blast_radius * 3)
-        elif blast_radius <= 10:
-            blast_score = 20 + ((blast_radius - 3) * 1.5)
-        else:
-            blast_score = 30
-        
-        out_degree = self.service_graph.out_degree(service_name)
-        
-        if out_degree == 0:
-            connectivity_score = 5
-        elif out_degree <= 3:
-            connectivity_score = 10 + (out_degree * 2)
-        elif out_degree <= 10:
-            connectivity_score = 16 + ((out_degree - 3) * 1.5)
-        else:
-            connectivity_score = 30
-        
-        return round(blast_score + severity_score + connectivity_score, 2)
-    
-    def _compute_alert_criticality_score(self, alert: dict, service_metrics: dict) -> float:
-        severity = alert.get('severity', '').lower()
-        severity_weights = {'critical': 1.0, 'high': 0.75, 'warning': 0.5, 'medium': 0.5, 'low': 0.25, 'info': 0.1}
-        severity_score = severity_weights.get(severity, 0.25) * 40
-        
-        pagerank = service_metrics.get('pagerank', 0.0)
-        if pagerank <= 0:
-            pagerank_score = 5
-        elif pagerank < 0.01:
-            pagerank_score = 8 + (pagerank * 700)
-        elif pagerank < 0.05:
-            pagerank_score = 15 + ((pagerank - 0.01) * 250)
-        else:
-            pagerank_score = 25
-        
-        degree = service_metrics.get('degree', 0)
-        in_degree = service_metrics.get('in_degree', 0)
-        
-        if degree == 0:
-            degree_score = 5
-        elif degree <= 5:
-            degree_score = 8 + (degree * 2)
-        elif degree <= 15:
-            degree_score = 18 + ((degree - 5) * 0.7)
-        else:
-            degree_score = 25
-        
-        if in_degree == 0:
-            upstream_score = 2
-        elif in_degree <= 3:
-            upstream_score = 4 + (in_degree * 1.5)
-        else:
-            upstream_score = 10
-        
-        return round(pagerank_score + degree_score + upstream_score + severity_score, 2)
-    
-    def _get_transitive_downstream(self, service_name, max_depth=2):
-        if not self.service_graph or not self.service_graph.has_node(service_name):
-            return set()
-        
-        visited = set()
-        queue = [(service_name, 0)]
-        
-        while queue:
-            current, depth = queue.pop(0)
-            
-            if depth >= max_depth:
-                continue
-            
-            for successor in self.service_graph.successors(current):
-                if successor not in visited:
-                    visited.add(successor)
-                    queue.append((successor, depth + 1))
-        
-        return visited
     
     def _save_clustering_stats(self, run_dir: str, clustering_stats: Dict) -> str:
         stats_converted = {}
