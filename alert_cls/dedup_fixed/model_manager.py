@@ -4,20 +4,19 @@ import json
 import os
 import numpy as np
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from collections import Counter
-from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
-from sklearn.metrics import silhouette_score
+from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
 
 from config import Config
 
 
 class ModelManager:
     
-    def __init__(self, model_dir='data/models', catalog_manager=None):
+    def __init__(self, model_dir='piepline_output/models', catalog_manager=None):
 
         self.model_dir = Config.MODEL_DIR or model_dir
         self.catalog_manager = catalog_manager
@@ -119,7 +118,6 @@ class ModelManager:
         print(f"  Algorithm: {algorithm}, Clusters: {metadata['n_clusters']}, Silhouette: {silhouette:.3f}")
         
         self.current_version = version
-        
         return version, metadata, labels
     
     def _increment_version(self) -> int:
@@ -150,7 +148,7 @@ class ModelManager:
             return best_k
         return 2
     #+++++++++++++++++++++++++++++++++++++++++++++++++++++
-    # checked and verfied: this function being called
+    # checked and verfied
     def _profile_clusters(self, labels: np.ndarray, alerts: List[Dict]) -> Dict:
         cluster_profiles = {}
         
@@ -183,7 +181,7 @@ class ModelManager:
         
         return cluster_profiles
     # +++++++++++++++++++++++++++++++++++++++++++++++++++
-    # checked and verified: this function being called correctly
+    # checked and verified
     def load_model(self, version: int = None) -> Dict:
         if version is None:
             version = self.current_version
@@ -230,7 +228,7 @@ class ModelManager:
             'version': version
         }
     # ++++++++++++++++++++++++++++++++++++++++++++++++++
-    # checked and verified: this function being called correctly
+    # checked and verified
     def compare_versions(self, v1: int, v2: int) -> Dict:
         meta1 = self._load_metadata(v1)
         meta2 = self._load_metadata(v2)
