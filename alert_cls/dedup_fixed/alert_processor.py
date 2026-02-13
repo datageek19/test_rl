@@ -659,7 +659,12 @@ class AlertProcessor:
             numeric_to_solid_id_map[numeric_cluster_id] = solid_cluster_id
         
             alert_types = [a.get('alert_name', '') for a in cluster_alerts]
-            services = [a.get('graph_service', '') for a in cluster_alerts if a.get('graph_service')]
+            # Use graph_service if available, otherwise fall back to service_name (for unmapped alerts)
+            services = []
+            for a in cluster_alerts:
+                svc = a.get('graph_service') or a.get('service_name') or ''
+                if svc:
+                    services.append(svc)
             categories = [a.get('alert_category', '') for a in cluster_alerts if a.get('alert_category')]
             
             cluster_metadata.append({
