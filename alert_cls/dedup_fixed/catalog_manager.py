@@ -262,7 +262,8 @@ class CatalogManager:
     def _build_alert_signature(self, alert: Dict) -> str:
         category = (alert.get('alert_category') or '').lower().strip()
         subcategory = (alert.get('alert_subcategory') or '').lower().strip()
-        service = (alert.get('graph_service') or '').lower().strip()
+        # Use graph_service if available, otherwise fall back to service_name (for unmapped alerts)
+        service = (alert.get('graph_service') or alert.get('service_name') or '').lower().strip()
         namespace = (alert.get('namespace') or '').lower().strip()
         
         signature = f"{category} {category} {subcategory} {service} {namespace}"
@@ -293,7 +294,9 @@ class CatalogManager:
         """Internal helper: Use TF-IDF + cosine similarity for fuzzy matching."""
         if not self.cluster_catalog:
             return None
-        if not (alert.get('graph_service') or '').strip():
+        # Allow matching for both mapped (graph_service) and unmapped (service_name) alerts
+        alert_service = (alert.get('graph_service') or alert.get('service_name') or '').strip()
+        if not alert_service:
             return None
         alert_signature = self._build_alert_signature(alert)
         if not alert_signature:
@@ -317,7 +320,6 @@ class CatalogManager:
                 cluster_info = self.cluster_catalog.get(matched_cluster_id, {})
                 catalog_impacted_services_list = cluster_info.get('impacted_services', [])
                 catalog_service_names = self._extract_service_names(catalog_impacted_services_list)
-                alert_service = (alert.get('graph_service') or '').strip()
                 if alert_service in catalog_service_names:
                     return matched_cluster_id
                 return None
@@ -343,7 +345,8 @@ class CatalogManager:
             return None, None
         alert_category = (alert.get('alert_category') or '').lower().strip()
         alert_subcategory = (alert.get('alert_subcategory') or '').lower().strip()
-        alert_service = (alert.get('graph_service') or '').strip()
+        # Use graph_service if available, otherwise fall back to service_name (for unmapped alerts)
+        alert_service = (alert.get('graph_service') or alert.get('service_name') or '').strip()
         
         # Strategy 1: Most specific - exact match on category + subcategory + service
         if alert_category and alert_subcategory and alert_service:
@@ -454,11 +457,23 @@ class CatalogManager:
             description_prefix = cluster_name.split('-', 1)[0].strip() if cluster_name else ''
             
             # Get services - try graph_service first, fall back to service_name
+            # Track which alerts are mapped vs unmapped for impacted_services logic
             services = []
+            mapped_services = []  # Services found in service graph
+            unmapped_services = []  # Services from alert metadata (not in graph)
+            
             for a in alerts:
-                svc = a.get('graph_service') or a.get('service_name') or ''
-                if svc:
-                    services.append(svc)
+                graph_svc = a.get('graph_service') or ''
+                alert_svc = a.get('service_name') or ''
+                
+                if graph_svc:
+                    # Alert is mapped to service graph
+                    services.append(graph_svc)
+                    mapped_services.append(graph_svc)
+                elif alert_svc:
+                    # Alert is unmapped - use service_name from metadata
+                    services.append(alert_svc)
+                    unmapped_services.append(alert_svc)
             
             alert_ids = [a.get('_id', '') for a in alerts if a.get('_id')]
             categories = [a.get('alert_category', '') for a in alerts if a.get('alert_category')]
@@ -472,31 +487,46 @@ class CatalogManager:
             service_metrics = self._compute_service_metrics(services)
             symptom_service = service_metrics['symptom_service']
             
-            # Compute impacted_services: find downstream services from all services in this cluster
-            # First try to get from alerts (propagated from group_alerts_by_relationships)
+            # Compute impacted_services based on whether alerts are mapped or unmapped
+            # For mapped alerts: try to get from alerts or compute from service graph
+            # For unmapped alerts: use service_name directly from alert metadata
             all_impacted_services = set()
+            
+            # First try to get from alerts (propagated from group_alerts_by_relationships)
             for a in alerts:
                 alert_impacted = a.get('impacted_services', [])
                 if alert_impacted:
                     all_impacted_services.update(alert_impacted)
             
-            # If no impacted_services from alerts, compute directly from service graph
-            if not all_impacted_services and self.service_graph:
-                for service_name in set(services):
-                    if service_name and self.service_graph.has_node(service_name):
-                        # Find downstream (impacted) services up to depth 2
-                        downstream = self._find_downstream_services(service_name, max_depth=2)
-                        all_impacted_services.update(downstream)
+            # If no impacted_services from alerts, compute based on mapping status
+            if not all_impacted_services:
+                # For mapped services: traverse service graph to find downstream services
+                if self.service_graph:
+                    for service_name in set(mapped_services):
+                        if service_name and self.service_graph.has_node(service_name):
+                            downstream = self._find_downstream_services(service_name, max_depth=2)
+                            all_impacted_services.update(downstream)
+                
+                # For unmapped services: the service_name itself IS the impacted service
+                # These alerts don't have service graph properties, so we use metadata directly
+                for service_name in set(unmapped_services):
+                    if service_name:
+                        all_impacted_services.add(service_name)
             
-            # Build impacted_services with properties from service graph
+            # Build impacted_services with properties from service graph (if available)
             impacted_services = []
             for service_name in all_impacted_services:
                 if not service_name:
                     continue
                 service_properties = {}
+                # Try to get properties from service graph if node exists
                 if self.service_graph and self.service_graph.has_node(service_name):
                     node_data = self.service_graph.nodes[service_name]
                     service_properties = dict(node_data)
+                else:
+                    # For unmapped services, add alert count from this cluster
+                    service_properties['alert_count'] = service_counts.get(service_name, 0)
+                    service_properties['unmapped'] = True  # Flag as not in service graph
                 service_obj = {service_name: service_properties}
                 impacted_services.append(service_obj)
             
