@@ -2,6 +2,10 @@
 
 Root cause analysis for service latency issues using causal inference (DoWhy GCM).
 
+Inpspired by these tutorials:
+ - Based on [DoWhy Microservice RCA](https://www.pywhy.org/dowhy/main/example_notebooks/gcm_rca_microservice_architecture.html) and [DoWhy Online Shop](https://www.pywhy.org/dowhy/main/example_notebooks/gcm_online_shop.html)
+
+
 ## What it does
 
 1. Filters alerts (firing + Latency subcategory) and maps them to a service graph
