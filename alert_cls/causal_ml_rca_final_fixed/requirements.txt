@@ -1,0 +1,6 @@
+# causal rca dependencies
+pandas>=1.5.0
+numpy>=1.23.0
+networkx>=3.0
+scipy>=1.10.0
+dowhy>=0.11.0
