@@ -287,9 +287,13 @@ attributions = attribute_anomalies(
 - [Shapley Values for Attribution](https://www.pywhy.org/dowhy/gcm/main/user_guide/attribution.html)
 
 ## Next Steps
+answer those questions:
 
-1. **Collect Real Latency Data**: Integrate with monitoring system (Prometheus, Datadog, etc.)
-2. **Tune Parameters**: Adjust anomaly thresholds and attribution methods
-3. **Visualization**: Add graphs showing causal relationships and attributions
-4. **Automation**: Schedule regular RCA runs on alert clusters
+Scope
+Feature Defination
+Risks & Watchouts
+Dependencies:
+   Platform
+   DevOps
+Business benefits
 
