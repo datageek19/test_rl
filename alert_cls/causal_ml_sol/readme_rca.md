@@ -287,13 +287,41 @@ attributions = attribute_anomalies(
 - [Shapley Values for Attribution](https://www.pywhy.org/dowhy/gcm/main/user_guide/attribution.html)
 
 ## Next Steps
-answer those questions:
+Scope:
+	- causal ml based root cause analysisfor service latency anomalies in a microservice environment, using causal inference (DoWhy GCM library).
+	- Ingests two data sources: (1) a service dependency graph  and (2) latency time-series data.
+	- this poc solution produces ranked root cause attributions for a single target service — identifying which upstream service most contributed to the latency anomaly.
 
-Scope
-Feature Defination
-Risks & Watchouts
+not in scope:
+	- Non-latency alert types (CPU, memory, error rate, etc.) 
+	- this poc solution is a batch/offline pipeline run on static data snapshots
+	- No UI, no API, no integration with anomaly detection framework
+------------------------------------------------------
+Feature Defination:
+	- Alert preprocessing: oads alert JSON files, filters to firing + Latency subcategory, maps alert service_name to service graph nodes. Produces a focused subgraph of affected services + neighbors (configurable hop depth).
+	- Latency data loading:Loads latency CSVs
+	- ausal graph construction:Reverses service call edges ,removes cycles to produce a DAG , aligns graph nodes with available latency services
+	- Anomaly detection: Splits latency data into normal vs. anomalous periods using z-score (default), IQR, or percentile methods. Ranks services by percentage latency increase.
+	- Causal model fitting: Builds a DoWhy StructuralCausalModel, auto-assigns causal mechanisms via gcm.auto.assign_causal_mechanisms(), fits on normal-period data only.
+	- RCA Scenario 1 — Anomaly Attribution: gcm.attribute_anomalies() — attributes specific anomalous samples at the target service to upstream nodes. by doing so, we aims to answer "Why was this service slow, what cause the latency" 
+	- RCA Scenario 2 — Distribution Change:gcm.distribution_change() — attributes the overall shift in mean latency between normal and anomalous periods. by doing so, we aims to answer : "hat caused the average latency to increase"
+
+---------------------------------------------------------
+Risks & Watchouts:
+	-Data quality dependency: Causal model accuracy depends on having sufficient, correctly-labeled latency data
+	- Small anomaly sample sizes ( in current solution I set condition to flag anomouls when sample less than 10), this needs to be tuned up
+	- DAG conversion is still not robust: Cycles in the service graph are broken by removing edges ; it is possible that the removed edge may be causally relevant.
+	- Single target service: in this poc solution, RCA is performed for only the top-1 most affected service (analyze_top_n=1). Other affected services are not analyzed unless the pipeline is run multiple times.
+	- DoWhy model assumptions need rethinking: auto-assigned causal mechanisms assume the data fits the structural causal model framework. If latency relationships are highly non-linear or context-dependent, model quality may degrade, that might be lookout in next pi
+	
 Dependencies:
-   Platform
-   DevOps
-Business benefits
+   Platform: python, dowhy, networkx
+   DevOps: Service dependency graph, Latency time-series data, alert data, and other infrastructure requirements (AKS, GKE ...)
+
+-----------------------------------------------------------
+Business benefits:
+	- This PoC identifies which upstream service caused the slowdown, using causal inference
+	- By ranking root causes with quantified attribution scores,
+	- Anomaly attribution explains individual incidents; distribution change explains systemic shifts
+	- 
 
