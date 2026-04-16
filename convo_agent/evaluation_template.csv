@@ -1,0 +1,16 @@
+display_name,evaluation_id,description,tags,evaluation_groups,turn_index,action_type,response_agent,text_content,image_mime_type,image_content,tool_name,tool_call_args_json,tool_response_json,updated_variables_json,agent_transfer_target,expectation_note
+Test Evaluation 1,test-evaluation-id1,a test evaluation,tag1,test-evaluation-dataset-display-name1,,,,,,,,,,,,
+,,,,,1,INPUT_TEXT,,test text,,,,,,,,
+,,,,,1,INPUT_IMAGE,,,image/jpeg,image-content,,,,,,
+,,,,,2,INPUT_TOOL_RESPONSE,,,,,test-tool-display-name,,"{""response1"": ""1"", ""response2"": 2}",,,
+,,,,,2,INPUT_UPDATED_VARIABLES,,,,,,,,"{""param1"": ""1"", ""param2"": 2}",,
+,,,,,3,EXPECTATION_TEXT,test-agent-display-name,test response,,,,,,,,
+,,,,,3,EXPECTATION_TOOL_CALL,,,,,test-tool-display-name,"{""arg1"": ""1"", ""arg2"": 2}",,,,test expectation note
+Test Evaluation 2,test-evaluation-id2,another test evaluation,tag1;tag2,test-evaluation-dataset-display-name1;test-evaluation-dataset-display-name2,,,,,,,,,,,,
+,,,,,1,EXPECTATION_TOOL_RESPONSE,,,,,test-tool-display-name,,,,,
+,,,,,2,EXPECTATION_AGENT_TRANSFER,,,,,,,,,test-agent-display-name,test expectation note
+,,,,,2,EXPECTATION_TOOL_CALL,,,,,product-catalog,"{
+                      ""query"": ""Gran Turismo 7""
+                    }",,,,
+,,,,,2,EXPECTATION_TOOL_RESPONSE,,,,,product-catalog,,,,,
+,,,,,2,EXPECTATION_TEXT,playstation-assistant,"Gran Turismo 7 was released on March 4, 2022. I am unable to provide the price.",,,,,,,,
